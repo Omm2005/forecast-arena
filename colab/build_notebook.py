@@ -58,6 +58,8 @@ compares them minute by minute.
     md("## 1. Install and write the project files"),
     code("""
 !pip install -q -U yfinance flask peft "transformers>=5" "chronos-forecasting>=2.2"
+# Colab ships an old torchao that the latest peft refuses to load alongside; this project doesn't use it
+!pip uninstall -y -q torchao
 import os
 os.makedirs("/content/lab/riskmc", exist_ok=True); os.makedirs("/content/lab/web", exist_ok=True)
 open("/content/lab/riskmc/__init__.py", "w").close()
