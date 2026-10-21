@@ -1,0 +1,5 @@
+# Extra packages to run Chronos-2 and TimesFM locally (CPU is fine for live forecasting)
+torch>=2.2
+transformers>=5
+peft
+chronos-forecasting>=2.2
