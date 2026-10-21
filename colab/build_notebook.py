@@ -73,6 +73,8 @@ cells += [
     code("""
 import sys, torch, numpy as np, pandas as pd
 sys.path.insert(0, "/content/lab")
+for name in [m for m in sys.modules if m == "app" or m.startswith("riskmc")]:
+    del sys.modules[name]                      # re-running in the same session: load the files just written
 from riskmc import training as T
 from riskmc.forecasters import build
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
