@@ -272,9 +272,11 @@ if __name__ == "__main__":
     models = build(load_ai=not a.no_ai,
                    chronos_path=str(chronos_dir) if chronos_dir.exists() else None,
                    timesfm_adapter=str(timesfm_dir) if timesfm_dir.exists() else None,
-                   scales=(report or {}).get("scales") if report else None)
+                   scales=(report or {}).get("scales"), configs=(report or {}).get("configs"))
     for m in models.values():
-        state = "not loaded" if not m.available else "trained" if m.info()["fine_tuned"] else "base model"
-        print(f"  {m.name:<12} {state}, range width x{m.scale:.2f}")
+        info = m.info()
+        state = "not loaded" if not m.available else "trained" if info["fine_tuned"] else "base model"
+        setup = f", {info['input_mode']} input, context {info['context']}" if "input_mode" in info else ""
+        print(f"  {m.name:<12} {state}{setup}, range width x{m.scale:.2f}")
     print("Forecast Arena → http://127.0.0.1:5050")
     serve(models, report)

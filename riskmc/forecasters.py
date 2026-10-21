@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .minute import LEVELS, mc_quantiles, model_frame, rescale
+from .minute import LEVELS, mc_quantiles, model_frame, rescale, returns_bps
 
 NAN_ROW = np.full(len(LEVELS), np.nan)
 
@@ -76,7 +76,40 @@ def _batches(items, size):
         yield items[k:k + size]
 
 
-class Chronos2Forecaster(Forecaster):
+class AIForecaster(Forecaster):
+    """Shared input handling for the foundation models.
+
+    input_mode "prices":  the model reads the last `context` prices and forecasts the next price.
+    input_mode "returns": the model reads the last `context` 1-minute returns (bps, gaps dropped) and
+                          forecasts the next return, converted back to a price range.
+    """
+    input_mode = "returns"
+    context = 512
+
+    def _contexts(self, histories: list[pd.Series]) -> list[np.ndarray]:
+        if self.input_mode == "prices":
+            return [h.to_numpy(dtype=np.float32)[-self.context:] for h in histories]
+        return [returns_bps(h).to_numpy(dtype=np.float32)[-self.context:] for h in histories]
+
+    def _to_prices(self, q: np.ndarray, histories: list[pd.Series]) -> np.ndarray:
+        if self.input_mode == "prices":
+            return q
+        last = np.array([float(h.iloc[-1]) for h in histories])[:, None]
+        return last * np.exp(q / 1e4)
+
+    def _predict(self, arrays: list[np.ndarray]) -> np.ndarray:
+        raise NotImplementedError
+
+    def raw_quantiles(self, histories):
+        arrays = self._contexts(histories)
+        q = np.concatenate([self._predict(b) for b in _batches(arrays, self.batch_size)])
+        return self._to_prices(q, histories)
+
+    def info(self) -> dict:
+        return {**super().info(), "input_mode": self.input_mode, "context": self.context}
+
+
+class Chronos2Forecaster(AIForecaster):
     key, name = "chronos2", "Chronos-2"
     blurb = "Amazon's 120M-parameter time-series foundation model"
 
@@ -99,10 +132,6 @@ class Chronos2Forecaster(Forecaster):
         if isinstance(q, (list, tuple)):                  # Chronos-2: one tensor per series
             return np.stack([np.asarray(x.float().cpu()).reshape(-1)[:len(LEVELS)] for x in q])
         return np.asarray(q.float().cpu()).reshape(len(arrays), -1)[:, :len(LEVELS)]
-
-    def raw_quantiles(self, histories):
-        arrays = [h.to_numpy(dtype=np.float32)[-self.context:] for h in histories]
-        return np.concatenate([self._predict(b) for b in _batches(arrays, self.batch_size)])
 
     def fine_tune(self, series: list[np.ndarray], out_dir: str, validation: list[np.ndarray] | None = None,
                   num_steps: int = 600, learning_rate: float = 1e-4, batch_size: int = 64, mode: str = "lora",
@@ -131,7 +160,7 @@ class Chronos2Forecaster(Forecaster):
         self.path, self.fine_tuned = str(Path(out_dir) / "finetuned-ckpt"), True
 
 
-class TimesFMForecaster(Forecaster):
+class TimesFMForecaster(AIForecaster):
     key, name = "timesfm", "TimesFM 2.5"
     blurb = "Google's 200M-parameter time-series foundation model"
 
@@ -149,18 +178,14 @@ class TimesFMForecaster(Forecaster):
             self.model = PeftModel.from_pretrained(self.model, adapter).to(device)
         self.model.eval()
 
-    def raw_quantiles(self, histories):
+    def _predict(self, arrays):
         import torch
 
-        arrays = [h.to_numpy(dtype=np.float32)[-self.context:] for h in histories]
-        out = []
         with torch.no_grad():
-            for b in _batches(arrays, self.batch_size):
-                res = self.model(past_values=[torch.tensor(a, device=self.device) for a in b],
-                                 forecast_context_len=self.context)
-                # full_predictions: (batch, horizon, 10) = mean, then the 10th..90th percentiles
-                out.append(res.full_predictions[:, 0, 1:1 + len(LEVELS)].float().cpu().numpy())
-        return np.concatenate(out)
+            res = self.model(past_values=[torch.tensor(a, device=self.device) for a in arrays],
+                             forecast_context_len=self.context, truncate_negative=False)
+        # full_predictions: (batch, horizon, 10) = mean, then the 10th..90th percentiles
+        return res.full_predictions[:, 0, 1:1 + len(LEVELS)].float().cpu().numpy()
 
     def fine_tune(self, series: list[np.ndarray], out_dir: str, validation: list[np.ndarray] | None = None,
                   targets: list[np.ndarray] | None = None, num_steps: int = 600, learning_rate: float = 5e-5,
@@ -196,7 +221,8 @@ class TimesFMForecaster(Forecaster):
                 for b in _batches(validation, 64):
                     ctx = [torch.tensor(w[:-1], device=self.device) for w in b]
                     tgt = torch.tensor([[w[-1]] for w in b], device=self.device)
-                    total += model(past_values=ctx, future_values=tgt, forecast_context_len=self.context).loss.item() * len(b)
+                    total += model(past_values=ctx, future_values=tgt, forecast_context_len=self.context,
+                                   truncate_negative=False).loss.item() * len(b)
                     n += len(b)
             model.train()
             return total / n
@@ -215,7 +241,7 @@ class TimesFMForecaster(Forecaster):
                 ctx.append(torch.tensor(s[i - self.context:i], device=self.device))
                 tgt.append(float(s[i]))
             loss = model(past_values=ctx, future_values=torch.tensor(tgt, device=self.device)[:, None],
-                         forecast_context_len=self.context).loss
+                         forecast_context_len=self.context, truncate_negative=False).loss
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad(); sched.step()
@@ -239,7 +265,8 @@ class TimesFMForecaster(Forecaster):
 
 
 def build(load_ai: bool = True, device: str | None = None, chronos_path: str | None = None,
-          timesfm_adapter: str | None = None, scales: dict | None = None) -> dict[str, Forecaster]:
+          timesfm_adapter: str | None = None, scales: dict | None = None,
+          configs: dict | None = None) -> dict[str, Forecaster]:
     """All forecasters that can be loaded here. A model that fails to load stays listed as unavailable."""
     if device is None:
         try:
@@ -262,6 +289,9 @@ def build(load_ai: bool = True, device: str | None = None, chronos_path: str | N
             stub.available, stub.error = False, f"{type(e).__name__}: {e}"
             models[key] = stub
             print(f"Could not load {stub.name}: {stub.error}")
+    for key, cfg in (configs or {}).items():
+        if key in models and isinstance(models[key], AIForecaster):
+            models[key].input_mode, models[key].context = cfg["input_mode"], int(cfg["context"])
     for key, s in (scales or {}).items():
         if key in models:
             models[key].scale = float(s)

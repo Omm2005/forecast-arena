@@ -94,11 +94,38 @@ MODELS = build(device=DEVICE)
 for m in MODELS.values():
     print(f"{m.name:<12} {'loaded' if m.available else 'FAILED: ' + str(m.error)}")
 """),
-    md("## 4. Score the untrained models on the test sessions\nThis is the baseline the training has to beat."),
+    md("""
+## 4. Score the untrained models on the test sessions
+Out of the box, the way most tutorials use these models: they read the last 512 **prices** and forecast the next price.
+This is the baseline everything else has to beat.
+"""),
     code("""
 N_TEST = 150   # forecasts per ticker
+for key in ("chronos2", "timesfm"):
+    if MODELS[key].available:
+        MODELS[key].input_mode, MODELS[key].context = "prices", 512
 ZERO_SHOT = T.summarize(MODELS, T.collect(MODELS, DATA, "test", N_TEST))
 ZERO_SHOT.style.format(precision=3)
+"""),
+    md("""
+## 4b. Choose each model's input: prices or returns
+Fed raw prices, both models rescale the window by the price level, which drifts far more over 512 minutes than the
+next minute moves, so they mostly learn "next price ≈ last price" and fine-tuning has little to work with.
+Fed **1-minute returns**, each window is rescaled by its own recent volatility, so the forecast range adapts to calm and
+busy markets, the same idea behind the Monte Carlo model. Studies of these models on financial data recommend
+returns ([1](https://arxiv.org/html/2511.18578v1), [2](https://arxiv.org/html/2606.27100)).
+
+Rather than assume it, this cell tries prices vs returns and a short vs long context on the **calibration session**
+(never the test sessions) and keeps the best setting for each model.
+"""),
+    code("""
+CONFIG_TABLES = {}
+for key in ("chronos2", "timesfm"):
+    if MODELS[key].available:
+        CONFIG_TABLES[key] = T.select_config(key, MODELS[key], DATA)
+        print(MODELS[key].name); display(CONFIG_TABLES[key].style.format(precision=3))
+INPUT_FIXED = T.summarize(MODELS, T.collect(MODELS, DATA, "test", N_TEST, verbose=False))
+print("Test sessions with the chosen input (still untrained):"); display(INPUT_FIXED.style.format(precision=3))
 """),
     md("""
 ## 5. Fine-tune Chronos-2
@@ -109,15 +136,19 @@ starting before step 1. It should fall below its starting value; the checkpoint 
 One-minute prices are mostly noise, so expect small gains (a few percent), not a steep curve.
 """),
     code("""
-FT_SERIES = T.finetune_series(DATA)                          # full histories (TimesFM)
-FT_SESSIONS = T.finetune_series(DATA, split_sessions=True)   # cut at overnight gaps (Chronos-2)
-FT_TARGETS = T.finetune_targets(DATA)                        # gap-free target positions (TimesFM)
-VAL_WINDOWS = T.validation_windows(DATA)
-print(f"{sum(len(s) for s in FT_SERIES):,} training prices · {len(FT_SESSIONS)} trading sessions · "
-      f"{len(VAL_WINDOWS)} held-out validation windows")
+def training_data(m):
+    \"\"\"Training series, gap-free targets and validation windows in the model's chosen input.\"\"\"
+    if m.input_mode == "returns":       # gap returns are already dropped, so every position is a valid target
+        return (T.finetune_series(DATA, mode="returns"), None,
+                T.validation_windows(DATA, context=m.context, mode="returns"))
+    return (T.finetune_series(DATA, split_sessions=True), None,
+            T.validation_windows(DATA, context=m.context))
+
 if MODELS["chronos2"].available:
-    MODELS["chronos2"].fine_tune(FT_SESSIONS, out_dir="/content/models/chronos2-lora", validation=VAL_WINDOWS,
-                                 num_steps=600, learning_rate=1e-4)
+    m = MODELS["chronos2"]
+    series, _, val = training_data(m)
+    print(f"Chronos-2: {m.input_mode} input, context {m.context} · {len(series)} training series · {len(val)} validation windows")
+    m.fine_tune(series, out_dir="/content/models/chronos2-lora", validation=val, num_steps=600, learning_rate=1e-4)
 """),
     md("""
 ## 6. Fine-tune TimesFM 2.5
@@ -128,9 +159,14 @@ jump isn't a 1-minute move, and a few of them can swamp training. Validation los
 """),
     code("""
 if MODELS["timesfm"].available:
-    HIST = pd.DataFrame(MODELS["timesfm"].fine_tune(FT_SERIES, out_dir="/content/models/timesfm-lora",
-                                                    validation=VAL_WINDOWS, targets=FT_TARGETS,
-                                                    num_steps=600, learning_rate=5e-5, batch_size=64))
+    m = MODELS["timesfm"]
+    if m.input_mode == "returns":
+        series, targets, val = T.finetune_series(DATA, mode="returns"), None, T.validation_windows(DATA, context=m.context, mode="returns")
+    else:
+        series, targets, val = T.finetune_series(DATA), T.finetune_targets(DATA, m.context), T.validation_windows(DATA, context=m.context)
+    print(f"TimesFM: {m.input_mode} input, context {m.context} · {len(val)} validation windows")
+    HIST = pd.DataFrame(m.fine_tune(series, out_dir="/content/models/timesfm-lora", validation=val, targets=targets,
+                                    num_steps=600, learning_rate=5e-5, batch_size=64))
     ax = HIST.set_index("step")[["train", "val"]].rename(columns={"train": "training", "val": "validation (held out)"}).plot(
         marker="o", ms=3, figsize=(7, 3), title="TimesFM fine-tuning loss")
     ax.axhline(HIST["val"].iloc[0], ls="--", lw=1, color="gray", label="before training"); ax.legend();
@@ -143,14 +179,15 @@ so all three get the same calibration treatment.
     code("""
 for m in MODELS.values():
     m.scale = 1.0
-SCALES = T.calibrate(MODELS, T.collect(MODELS, DATA, "calib", N_TEST))
+SCALES = T.calibrate(MODELS, T.collect(MODELS, DATA, "calib", N_TEST, verbose=False))
 """),
     md("## 8. Score the trained models on the test sessions"),
     code("""
-TEST_ROWS = T.collect(MODELS, DATA, "test", N_TEST)
+TEST_ROWS = T.collect(MODELS, DATA, "test", N_TEST, verbose=False)
 TRAINED = T.summarize(MODELS, TEST_ROWS)
-print("Before training"); display(ZERO_SHOT.style.format(precision=3))
-print("After training");  display(TRAINED.style.format(precision=3))
+print("1. Out of the box (price input)"); display(ZERO_SHOT.style.format(precision=3))
+print("2. Chosen input, untrained");      display(INPUT_FIXED.style.format(precision=3))
+print("3. Fine-tuned + range width tuned"); display(TRAINED.style.format(precision=3))
 """),
     code("""
 import matplotlib.pyplot as plt
@@ -163,7 +200,8 @@ ax.set_xlabel("Pinball loss, bps (lower is better)"); ax.set_title("Test session
 """),
     code("""
 REPORT = T.save_report("/content/models/report.json", MODELS, ZERO_SHOT, TRAINED, SCALES, DATA,
-                       extra={"device": DEVICE})
+                       extra={"device": DEVICE, "input_fixed": INPUT_FIXED.reset_index().to_dict(orient="records"),
+                              "config_search": {k: t.to_dict(orient="records") for k, t in CONFIG_TABLES.items()}})
 print("Saved /content/models/report.json")
 """),
     md("""

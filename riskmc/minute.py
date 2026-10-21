@@ -29,6 +29,15 @@ def minute_returns(closes: pd.Series) -> pd.Series:
     return r.mask(gap.to_numpy())
 
 
+def returns_bps(closes: pd.Series) -> pd.Series:
+    """1-minute log returns in basis points, with returns across market gaps dropped.
+
+    This is what the AI models read in "returns" mode: each window is then rescaled by its own
+    recent volatility, instead of by a price level that drifts far more than one minute moves.
+    """
+    return (minute_returns(closes) * 1e4).dropna()
+
+
 def model_frame(closes: pd.Series, lookback: int = 120, lam: float = 0.97,
                 shrink: float = 0.5) -> pd.DataFrame:
     """Per-bar model state. Row t only uses returns up to and including bar t."""

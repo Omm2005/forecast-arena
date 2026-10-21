@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .markets import MARKETS
-from .minute import LEVELS, MAX_GAP, QCOLS, fit_scale, score
+from .minute import LEVELS, MAX_GAP, QCOLS, fit_scale, pinball_bps, rescale, returns_bps, score
 
 TRAIN_TICKERS = [s for m in MARKETS for s, _ in m["tickers"]]
 
@@ -81,7 +81,8 @@ def eval_indices(closes: pd.Series, start, end, n: int, min_history: int = 600) 
     return ok
 
 
-def collect(models: dict, data: dict[str, pd.Series], window: str, n_per_ticker: int) -> pd.DataFrame:
+def collect(models: dict, data: dict[str, pd.Series], window: str, n_per_ticker: int,
+            verbose: bool = True) -> pd.DataFrame:
     """Forecast every sampled point in the given window with every model."""
     rows = []
     for sym, closes in data.items():
@@ -103,7 +104,8 @@ def collect(models: dict, data: dict[str, pd.Series], window: str, n_per_ticker:
             df["model"], df["symbol"], df["last"], df["actual"] = key, sym, last, actual
             df["time"] = closes.index[[i + 1 for i in idxs]]
             rows.append(df.dropna(subset=QCOLS))
-        print(f"  {window}: {sym:<12} {len(idxs)} points")
+        if verbose:
+            print(f"  {window}: {sym:<12} {len(idxs)} points")
     return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
 
 
@@ -141,6 +143,8 @@ def save_report(path: str | Path, models: dict, zero_shot: pd.DataFrame, trained
         "bars": int(sum(len(s) for s in data.values())),
         "scales": scales,
         "zero_shot": zero_shot.reset_index().to_dict(orient="records"),
+        "configs": {k: {"input_mode": m.input_mode, "context": m.context}
+                    for k, m in models.items() if hasattr(m, "input_mode")},
         "trained": trained.reset_index().to_dict(orient="records"),
         **(extra or {}),
     }
@@ -150,16 +154,24 @@ def save_report(path: str | Path, models: dict, zero_shot: pd.DataFrame, trained
 
 
 def validation_windows(data: dict[str, pd.Series], per_ticker: int = 20, context: int = 512,
-                       seed: int = 0) -> list[np.ndarray]:
-    """Held-out windows from the calibration session: `context` prices followed by the target price.
+                       mode: str = "prices", seed: int = 0) -> list[np.ndarray]:
+    """Held-out windows from the calibration session: `context` values followed by the target value.
 
-    Used to watch validation loss while fine-tuning; none of these targets are in the training series.
+    `mode` matches the model's input: prices, or 1-minute returns in bps. Used to watch validation
+    loss while fine-tuning; none of these targets are in the training series.
     """
     rng = np.random.default_rng(seed)
     out = []
     for closes in data.values():
         sp = split_points(closes)
         if sp is None:
+            continue
+        if mode == "returns":
+            r = returns_bps(closes)
+            ok = np.flatnonzero((r.index >= sp[0]) & (r.index < sp[1]))
+            ok = ok[ok >= context]
+            for j in rng.choice(ok, size=min(per_ticker, len(ok)), replace=False):
+                out.append(r.to_numpy(dtype=np.float32)[j - context:j + 1])
             continue
         t = closes.index
         ok = [i for i in range(context, len(closes))
@@ -175,16 +187,20 @@ def _pretrain(closes: pd.Series) -> pd.Series | None:
 
 
 def finetune_series(data: dict[str, pd.Series], split_sessions: bool = False,
-                    min_len: int = 65) -> list[np.ndarray]:
-    """Per-ticker price histories that end before the calibration window.
+                    min_len: int = 65, mode: str = "prices") -> list[np.ndarray]:
+    """Per-ticker histories that end before the calibration window.
 
-    With `split_sessions`, each history is cut at overnight / lunch gaps, so no training target is
-    a next-morning opening price (a jump no 1-minute model should be fitted to).
+    mode "returns": 1-minute returns in bps with gap returns dropped, one series per ticker.
+    mode "prices" with `split_sessions`: prices cut at overnight / lunch gaps, so no training target
+    is a next-morning opening price (a jump no 1-minute model should be fitted to).
     """
     out = []
     for closes in data.values():
         c = _pretrain(closes)
         if c is None:
+            continue
+        if mode == "returns":
+            out.append(returns_bps(closes)[lambda r: r.index <= c.index[-1]].to_numpy(dtype=np.float32))
             continue
         if not split_sessions:
             out.append(c.to_numpy(dtype=np.float32))
@@ -210,3 +226,26 @@ def finetune_targets(data: dict[str, pd.Series], context: int = 512) -> list[np.
         ok[1:] &= (c.index[1:] - c.index[:-1]) <= MAX_GAP
         out.append(np.flatnonzero(ok))
     return out
+
+
+def select_config(key: str, model, data: dict[str, pd.Series], modes=("prices", "returns"),
+                  contexts=(128, 512), n_per_ticker: int = 60) -> pd.DataFrame:
+    """Try each input mode and context length on the calibration session; keep the best.
+
+    Configurations are compared by pinball loss after each gets its best range width, so the choice
+    reflects where the ranges sit and how they adapt, not just their starting width. The test
+    sessions are never used here.
+    """
+    rows = []
+    for mode in modes:
+        for ctx in contexts:
+            model.input_mode, model.context, model.scale = mode, ctx, 1.0
+            r = collect({key: model}, data, "calib", n_per_ticker, verbose=False)
+            q, actual, last = r[QCOLS].to_numpy(), r["actual"].to_numpy(), r["last"].to_numpy()
+            sc = fit_scale(q, actual, last)
+            rows.append({"input": mode, "context": ctx, "pinball (bps)": float(pinball_bps(rescale(q, sc), actual, last).mean()),
+                         "raw coverage 80%": float(((actual >= r["q10"]) & (actual <= r["q90"])).mean())})
+    table = pd.DataFrame(rows).sort_values("pinball (bps)").reset_index(drop=True)
+    model.input_mode, model.context = table.loc[0, "input"], int(table.loc[0, "context"])
+    print(f"  {model.name}: using {model.input_mode} input, context {model.context}")
+    return table
