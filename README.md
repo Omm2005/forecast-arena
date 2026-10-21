@@ -1,4 +1,4 @@
-# Portfolio Risk Simulation & Forecasting
+# Forecast Arena
 
 Two parts: a Monte Carlo Value-at-Risk engine for multi-asset portfolios, and a live arena where a Monte Carlo
 model competes with two open-source AI forecasting models, **Chronos-2** (Amazon) and **TimesFM 2.5** (Google),

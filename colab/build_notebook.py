@@ -39,7 +39,7 @@ def code(text, hidden=False):
 
 cells = [
     md("""
-# Minute Forecast Lab: Monte Carlo vs Chronos-2 vs TimesFM
+# Forecast Arena: Monte Carlo vs Chronos-2 vs TimesFM
 
 Three models predict where a stock's **next 1-minute price** will land, as a range (10th–90th percentile):
 
@@ -164,7 +164,7 @@ lock in a forecast, and each is checked when the real price arrives.
 import app
 app.serve(MODELS, REPORT, port=5050, background=True)
 from google.colab import output
-output.serve_kernel_port_as_window(5050, anchor_text="Open Minute Forecast Lab")
+output.serve_kernel_port_as_window(5050, anchor_text="Open Forecast Arena")
 """),
     code("""
 # Or show it inside the notebook:

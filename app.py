@@ -1,4 +1,4 @@
-"""Minute Forecast Lab: Monte Carlo vs Chronos-2 vs TimesFM, scored live on real minute prices.
+"""Forecast Arena: Monte Carlo vs Chronos-2 vs TimesFM, scored live on real minute prices.
 
     python app.py              # local, Monte Carlo only (AI models load if installed)
     In Colab: see colab/Minute_Forecast_Lab.ipynb, which calls serve(models, report)
@@ -276,5 +276,5 @@ if __name__ == "__main__":
     for m in models.values():
         state = "not loaded" if not m.available else "trained" if m.info()["fine_tuned"] else "base model"
         print(f"  {m.name:<12} {state}, range width x{m.scale:.2f}")
-    print("Minute Forecast Lab → http://127.0.0.1:5050")
+    print("Forecast Arena → http://127.0.0.1:5050")
     serve(models, report)
