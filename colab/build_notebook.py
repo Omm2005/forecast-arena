@@ -109,23 +109,28 @@ starting before step 1. It should fall below its starting value; the checkpoint 
 One-minute prices are mostly noise, so expect small gains (a few percent), not a steep curve.
 """),
     code("""
-FT_SERIES = T.finetune_series(DATA)
+FT_SERIES = T.finetune_series(DATA)                          # full histories (TimesFM)
+FT_SESSIONS = T.finetune_series(DATA, split_sessions=True)   # cut at overnight gaps (Chronos-2)
+FT_TARGETS = T.finetune_targets(DATA)                        # gap-free target positions (TimesFM)
 VAL_WINDOWS = T.validation_windows(DATA)
-print(len(FT_SERIES), "training series,", sum(len(s) for s in FT_SERIES), "prices ·", len(VAL_WINDOWS), "validation windows")
+print(f"{sum(len(s) for s in FT_SERIES):,} training prices · {len(FT_SESSIONS)} trading sessions · "
+      f"{len(VAL_WINDOWS)} held-out validation windows")
 if MODELS["chronos2"].available:
-    MODELS["chronos2"].fine_tune(FT_SERIES, out_dir="/content/models/chronos2-lora", validation=VAL_WINDOWS,
+    MODELS["chronos2"].fine_tune(FT_SESSIONS, out_dir="/content/models/chronos2-lora", validation=VAL_WINDOWS,
                                  num_steps=600, learning_rate=1e-4)
 """),
     md("""
 ## 6. Fine-tune TimesFM 2.5
 LoRA fine-tuning following TimesFM's own example: random 512-minute windows, predict the next minute,
-minimizing the model's built-in quantile loss. Validation loss on the same held-out windows is checked every 25 steps
+minimizing the model's built-in quantile loss. Targets right after an overnight or lunch gap are skipped: an opening
+jump isn't a 1-minute move, and a few of them can swamp training. Validation loss on the same held-out windows is checked every 25 steps
 (and before training); the best adapter is kept.
 """),
     code("""
 if MODELS["timesfm"].available:
     HIST = pd.DataFrame(MODELS["timesfm"].fine_tune(FT_SERIES, out_dir="/content/models/timesfm-lora",
-                                                    validation=VAL_WINDOWS, num_steps=600, learning_rate=1e-4))
+                                                    validation=VAL_WINDOWS, targets=FT_TARGETS,
+                                                    num_steps=600, learning_rate=5e-5, batch_size=64))
     ax = HIST.set_index("step")[["train", "val"]].rename(columns={"train": "training", "val": "validation (held out)"}).plot(
         marker="o", ms=3, figsize=(7, 3), title="TimesFM fine-tuning loss")
     ax.axhline(HIST["val"].iloc[0], ls="--", lw=1, color="gray", label="before training"); ax.legend();

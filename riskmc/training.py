@@ -169,11 +169,44 @@ def validation_windows(data: dict[str, pd.Series], per_ticker: int = 20, context
     return out
 
 
-def finetune_series(data: dict[str, pd.Series]) -> list[np.ndarray]:
-    """Per-ticker price histories that end before the calibration window."""
+def _pretrain(closes: pd.Series) -> pd.Series | None:
+    sp = split_points(closes)
+    return None if sp is None else closes[closes.index < sp[0]]
+
+
+def finetune_series(data: dict[str, pd.Series], split_sessions: bool = False,
+                    min_len: int = 65) -> list[np.ndarray]:
+    """Per-ticker price histories that end before the calibration window.
+
+    With `split_sessions`, each history is cut at overnight / lunch gaps, so no training target is
+    a next-morning opening price (a jump no 1-minute model should be fitted to).
+    """
     out = []
     for closes in data.values():
-        sp = split_points(closes)
-        if sp is not None:
-            out.append(closes[closes.index < sp[0]].to_numpy(dtype=np.float32))
+        c = _pretrain(closes)
+        if c is None:
+            continue
+        if not split_sessions:
+            out.append(c.to_numpy(dtype=np.float32))
+            continue
+        session_id = (c.index.to_series().diff() > MAX_GAP).cumsum().to_numpy()
+        for k in np.unique(session_id):
+            seg = c.to_numpy(dtype=np.float32)[session_id == k]
+            if len(seg) >= min_len:
+                out.append(seg)
+    return out
+
+
+def finetune_targets(data: dict[str, pd.Series], context: int = 512) -> list[np.ndarray]:
+    """For each series from finetune_series(data), the positions that are valid prediction targets:
+    a full `context` of history before them and no gap between the target and the bar before it."""
+    out = []
+    for closes in data.values():
+        c = _pretrain(closes)
+        if c is None:
+            continue
+        ok = np.ones(len(c), dtype=bool)
+        ok[:context] = False
+        ok[1:] &= (c.index[1:] - c.index[:-1]) <= MAX_GAP
+        out.append(np.flatnonzero(ok))
     return out

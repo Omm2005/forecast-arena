@@ -106,7 +106,7 @@ class Chronos2Forecaster(Forecaster):
 
     def fine_tune(self, series: list[np.ndarray], out_dir: str, validation: list[np.ndarray] | None = None,
                   num_steps: int = 600, learning_rate: float = 1e-4, batch_size: int = 64, mode: str = "lora",
-                  every: int = 25) -> None:
+                  every: int = 25, min_past: int = 64) -> None:
         """Fine-tune with chronos-forecasting's own `fit` (LoRA by default).
 
         With `validation` windows, the trainer scores held-out loss before step 1 and every `every`
@@ -118,7 +118,8 @@ class Chronos2Forecaster(Forecaster):
         wanted = {"inputs": [s.astype(np.float32) for s in series], "prediction_length": 1,
                   "validation_inputs": [v.astype(np.float32) for v in validation] if validation else None,
                   "finetune_mode": mode, "num_steps": num_steps, "learning_rate": learning_rate,
-                  "batch_size": batch_size, "context_length": self.context, "output_dir": out_dir}
+                  "batch_size": batch_size, "context_length": self.context, "min_past": min_past,
+                  "output_dir": out_dir}
         params = inspect.signature(self.pipe.fit).parameters
         kwargs = {k: v for k, v in wanted.items() if k in params}
         if any(p.kind == p.VAR_KEYWORD for p in params.values()):      # forwarded to TrainingArguments
@@ -162,20 +163,24 @@ class TimesFMForecaster(Forecaster):
         return np.concatenate(out)
 
     def fine_tune(self, series: list[np.ndarray], out_dir: str, validation: list[np.ndarray] | None = None,
-                  num_steps: int = 600, learning_rate: float = 1e-4, batch_size: int = 32, lora_r: int = 4,
-                  every: int = 25, seed: int = 0) -> list[dict]:
+                  targets: list[np.ndarray] | None = None, num_steps: int = 600, learning_rate: float = 5e-5,
+                  batch_size: int = 64, lora_r: int = 4, every: int = 25, seed: int = 0) -> list[dict]:
         """LoRA fine-tuning, following TimesFM's own example (timesfm-forecasting/examples/finetuning).
 
         Each step samples random (512 context -> next price) windows from the training series and
         minimizes the model's built-in loss (MSE + quantile loss in normalized space). With
         `validation` windows, held-out loss is measured before step 1 and every `every` steps, and
-        the adapter weights with the lowest validation loss are kept. Returns the loss history.
+        the adapter weights with the lowest validation loss are kept. `targets` (from
+        training.finetune_targets) restricts training to targets that don't follow a market gap.
+        Returns the loss history.
         """
         import torch
         from peft import LoraConfig, get_peft_model
 
         rng = np.random.default_rng(seed)
-        series = [s for s in series if len(s) > self.context + 1]
+        if targets is None:
+            targets = [np.arange(self.context, len(s)) for s in series]
+        pool = [(s, t) for s, t in zip(series, targets) if len(t)]
         model = get_peft_model(self.model, LoraConfig(r=lora_r, lora_alpha=2 * lora_r, target_modules="all-linear",
                                                       lora_dropout=0.05, bias="none"))
         model.print_trainable_parameters()
@@ -205,10 +210,10 @@ class TimesFMForecaster(Forecaster):
         for step in range(1, num_steps + 1):
             ctx, tgt = [], []
             for _ in range(batch_size):
-                s = series[rng.integers(len(series))]
-                start = rng.integers(0, len(s) - self.context - 1)
-                ctx.append(torch.tensor(s[start:start + self.context], device=self.device))
-                tgt.append(float(s[start + self.context]))
+                s, t = pool[rng.integers(len(pool))]
+                i = int(t[rng.integers(len(t))])                  # target position
+                ctx.append(torch.tensor(s[i - self.context:i], device=self.device))
+                tgt.append(float(s[i]))
             loss = model(past_values=ctx, future_values=torch.tensor(tgt, device=self.device)[:, None],
                          forecast_context_len=self.context).loss
             loss.backward()
