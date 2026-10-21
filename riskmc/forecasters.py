@@ -104,18 +104,28 @@ class Chronos2Forecaster(Forecaster):
         arrays = [h.to_numpy(dtype=np.float32)[-self.context:] for h in histories]
         return np.concatenate([self._predict(b) for b in _batches(arrays, self.batch_size)])
 
-    def fine_tune(self, series: list[np.ndarray], out_dir: str, num_steps: int = 600,
-                  learning_rate: float = 1e-5, batch_size: int = 64, mode: str = "lora") -> None:
-        """Fine-tune on minute price histories with chronos-forecasting's own `fit` (LoRA by default)."""
+    def fine_tune(self, series: list[np.ndarray], out_dir: str, validation: list[np.ndarray] | None = None,
+                  num_steps: int = 600, learning_rate: float = 1e-4, batch_size: int = 64, mode: str = "lora",
+                  every: int = 25) -> None:
+        """Fine-tune with chronos-forecasting's own `fit` (LoRA by default).
+
+        With `validation` windows, the trainer scores held-out loss before step 1 and every `every`
+        steps, and keeps the checkpoint with the lowest validation loss.
+        """
         if not hasattr(self.pipe, "fit"):
             raise RuntimeError("This chronos-forecasting version has no fit(); upgrade with "
                                "pip install -U chronos-forecasting")
         wanted = {"inputs": [s.astype(np.float32) for s in series], "prediction_length": 1,
-                  "finetune_mode": mode, "num_steps": num_steps, "learning_rate": learning_rate, "batch_size": batch_size,
-                  "context_length": self.context, "output_dir": out_dir}
+                  "validation_inputs": [v.astype(np.float32) for v in validation] if validation else None,
+                  "finetune_mode": mode, "num_steps": num_steps, "learning_rate": learning_rate,
+                  "batch_size": batch_size, "context_length": self.context, "output_dir": out_dir}
         params = inspect.signature(self.pipe.fit).parameters
         kwargs = {k: v for k, v in wanted.items() if k in params}
-        print("Chronos-2 fit() with", {k: v for k, v in kwargs.items() if k != "inputs"})
+        if any(p.kind == p.VAR_KEYWORD for p in params.values()):      # forwarded to TrainingArguments
+            kwargs.update(logging_steps=every)
+            if validation:
+                kwargs.update(eval_steps=every, save_steps=every, eval_on_start=True)
+        print("Chronos-2 fit() with", {k: (f"{len(v)} series" if isinstance(v, list) else v) for k, v in kwargs.items()})
         self.pipe = self.pipe.fit(**kwargs)                # fit() saves to out_dir/finetuned-ckpt itself
         self.path, self.fine_tuned = str(Path(out_dir) / "finetuned-ckpt"), True
 
@@ -151,12 +161,15 @@ class TimesFMForecaster(Forecaster):
                 out.append(res.full_predictions[:, 0, 1:1 + len(LEVELS)].float().cpu().numpy())
         return np.concatenate(out)
 
-    def fine_tune(self, series: list[np.ndarray], out_dir: str, num_steps: int = 600,
-                  learning_rate: float = 1e-4, batch_size: int = 32, lora_r: int = 4, seed: int = 0) -> list[float]:
+    def fine_tune(self, series: list[np.ndarray], out_dir: str, validation: list[np.ndarray] | None = None,
+                  num_steps: int = 600, learning_rate: float = 1e-4, batch_size: int = 32, lora_r: int = 4,
+                  every: int = 25, seed: int = 0) -> list[dict]:
         """LoRA fine-tuning, following TimesFM's own example (timesfm-forecasting/examples/finetuning).
 
-        Each step samples random (512 context -> next price) windows from the training
-        series; the model's built-in loss (MSE + quantile loss in normalized space) is minimized.
+        Each step samples random (512 context -> next price) windows from the training series and
+        minimizes the model's built-in loss (MSE + quantile loss in normalized space). With
+        `validation` windows, held-out loss is measured before step 1 and every `every` steps, and
+        the adapter weights with the lowest validation loss are kept. Returns the loss history.
         """
         import torch
         from peft import LoraConfig, get_peft_model
@@ -168,7 +181,26 @@ class TimesFMForecaster(Forecaster):
         model.print_trainable_parameters()
         opt = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=num_steps)
-        losses = []
+
+        def val_loss() -> float | None:
+            if not validation:
+                return None
+            model.eval()
+            total, n = 0.0, 0
+            with torch.no_grad():
+                for b in _batches(validation, 64):
+                    ctx = [torch.tensor(w[:-1], device=self.device) for w in b]
+                    tgt = torch.tensor([[w[-1]] for w in b], device=self.device)
+                    total += model(past_values=ctx, future_values=tgt, forecast_context_len=self.context).loss.item() * len(b)
+                    n += len(b)
+            model.train()
+            return total / n
+
+        lora_state = lambda: {k: v.detach().clone() for k, v in model.state_dict().items() if "lora_" in k}
+        history = [{"step": 0, "train": None, "val": val_loss()}]
+        best_val, best_state, best_step = history[0]["val"], lora_state(), 0
+        print(f"  TimesFM step 0    validation loss {best_val}")
+        recent = []
         model.train()
         for step in range(1, num_steps + 1):
             ctx, tgt = [], []
@@ -182,13 +214,23 @@ class TimesFMForecaster(Forecaster):
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step(); opt.zero_grad(); sched.step()
-            losses.append(loss.item())
-            if step % 50 == 0 or step == num_steps:
-                print(f"  TimesFM step {step}/{num_steps}  loss {np.mean(losses[-50:]):.4f}")
+            recent.append(loss.item())
+            if step % every == 0 or step == num_steps:
+                v = val_loss()
+                history.append({"step": step, "train": float(np.mean(recent)), "val": v})
+                recent = []
+                mark = ""
+                if v is not None and (best_val is None or v < best_val):
+                    best_val, best_state, best_step, mark = v, lora_state(), step, "  ← best"
+                print(f"  TimesFM step {step:<4} train loss {history[-1]['train']:.5f}"
+                      + (f"  validation loss {v:.5f}{mark}" if v is not None else ""))
+        if validation:
+            model.load_state_dict(best_state, strict=False)
+            print(f"  Kept the adapter from step {best_step} (lowest validation loss {best_val:.5f})")
         model.eval()
         model.save_pretrained(out_dir)
         self.model, self.fine_tuned = model, True
-        return losses
+        return history
 
 
 def build(load_ai: bool = True, device: str | None = None, chronos_path: str | None = None,

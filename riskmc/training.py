@@ -149,6 +149,26 @@ def save_report(path: str | Path, models: dict, zero_shot: pd.DataFrame, trained
     return report
 
 
+def validation_windows(data: dict[str, pd.Series], per_ticker: int = 20, context: int = 512,
+                       seed: int = 0) -> list[np.ndarray]:
+    """Held-out windows from the calibration session: `context` prices followed by the target price.
+
+    Used to watch validation loss while fine-tuning; none of these targets are in the training series.
+    """
+    rng = np.random.default_rng(seed)
+    out = []
+    for closes in data.values():
+        sp = split_points(closes)
+        if sp is None:
+            continue
+        t = closes.index
+        ok = [i for i in range(context, len(closes))
+              if sp[0] <= t[i] < sp[1] and t[i] - t[i - 1] <= MAX_GAP]
+        for i in rng.choice(ok, size=min(per_ticker, len(ok)), replace=False):
+            out.append(closes.to_numpy(dtype=np.float32)[i - context:i + 1])
+    return out
+
+
 def finetune_series(data: dict[str, pd.Series]) -> list[np.ndarray]:
     """Per-ticker price histories that end before the calibration window."""
     out = []

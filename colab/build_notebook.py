@@ -103,22 +103,32 @@ ZERO_SHOT.style.format(precision=3)
     md("""
 ## 5. Fine-tune Chronos-2
 Uses chronos-forecasting's built-in `fit()` with LoRA adapters on the older weeks of every ticker.
+
+**Reading the table:** *Validation Loss* is measured on held-out minutes from the calibration session (never trained on),
+starting before step 1. It should fall below its starting value; the checkpoint with the lowest validation loss is kept.
+One-minute prices are mostly noise, so expect small gains (a few percent), not a steep curve.
 """),
     code("""
 FT_SERIES = T.finetune_series(DATA)
-print(len(FT_SERIES), "training series,", sum(len(s) for s in FT_SERIES), "prices")
+VAL_WINDOWS = T.validation_windows(DATA)
+print(len(FT_SERIES), "training series,", sum(len(s) for s in FT_SERIES), "prices ·", len(VAL_WINDOWS), "validation windows")
 if MODELS["chronos2"].available:
-    MODELS["chronos2"].fine_tune(FT_SERIES, out_dir="/content/models/chronos2-lora", num_steps=600)
+    MODELS["chronos2"].fine_tune(FT_SERIES, out_dir="/content/models/chronos2-lora", validation=VAL_WINDOWS,
+                                 num_steps=600, learning_rate=1e-4)
 """),
     md("""
 ## 6. Fine-tune TimesFM 2.5
 LoRA fine-tuning following TimesFM's own example: random 512-minute windows, predict the next minute,
-minimizing the model's built-in quantile loss.
+minimizing the model's built-in quantile loss. Validation loss on the same held-out windows is checked every 25 steps
+(and before training); the best adapter is kept.
 """),
     code("""
 if MODELS["timesfm"].available:
-    LOSSES = MODELS["timesfm"].fine_tune(FT_SERIES, out_dir="/content/models/timesfm-lora", num_steps=600)
-    pd.Series(LOSSES).rolling(25).mean().plot(title="TimesFM fine-tuning loss", figsize=(7, 3));
+    HIST = pd.DataFrame(MODELS["timesfm"].fine_tune(FT_SERIES, out_dir="/content/models/timesfm-lora",
+                                                    validation=VAL_WINDOWS, num_steps=600, learning_rate=1e-4))
+    ax = HIST.set_index("step")[["train", "val"]].rename(columns={"train": "training", "val": "validation (held out)"}).plot(
+        marker="o", ms=3, figsize=(7, 3), title="TimesFM fine-tuning loss")
+    ax.axhline(HIST["val"].iloc[0], ls="--", lw=1, color="gray", label="before training"); ax.legend();
 """),
     md("""
 ## 7. Tune every model's range width
