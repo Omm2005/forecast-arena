@@ -18,7 +18,7 @@ import yfinance as yf
 from flask import Flask, jsonify, send_from_directory
 
 from riskmc.markets import catalog, market_for, status
-from riskmc.minute import MAX_GAP, QCOLS, score
+from riskmc.minute import MAX_GAP, QCOLS, add_game_points, game_ranges, points, score
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(ROOT / "web"))
@@ -153,6 +153,21 @@ def _inside(q, actual) -> bool:
     return bool(q[0] <= actual <= q[-1])
 
 
+def _width(qs: dict) -> float:
+    """The round's shared outer width: the average of the models' own 10th-90th percentile widths."""
+    return float(np.mean([q[-1] - q[0] for q in qs.values()]))
+
+
+def _game(q, width: float, actual: float | None = None) -> dict:
+    """One model's game ranges for a round (and its points, once the price is known)."""
+    olo, ohi, ilo, ihi = game_ranges(q[4], width)
+    out = {"center": float(q[4]), "outer": [float(olo), float(ohi)], "inner": [float(ilo), float(ihi)],
+           "own": [float(q[0]), float(q[-1])]}
+    if actual is not None:
+        out["points"] = int(points(q[4], width, actual))
+    return out
+
+
 @app.get("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
@@ -174,6 +189,7 @@ def forecast_api(symbol: str):
         return jsonify({"error": f"Not enough minute history for {symbol} yet (need about 2 sessions)"}), 404
 
     replay = get_replay(symbol, closes)
+    rp = add_game_points(replay, ["time"]) if not replay.empty else replay
     pred, results = update_live(symbol, closes)
     keys = list(available_models())
 
@@ -186,31 +202,32 @@ def forecast_api(symbol: str):
 
     # chart: last hour of actual prices with each model's replayed 8-in-10 range
     by_model = {k: replay[replay["model"] == k].set_index("time") for k in keys} if not replay.empty else {}
-    points = []
+    chart_points = []
     for t, c in closes.iloc[-60:].items():
         p = {"t": _hhmm(t), "actual": float(c), "ranges": {}}
         for k, df in by_model.items():
             if t in df.index:
                 p["ranges"][k] = [float(df.at[t, "q10"]), float(df.at[t, "q90"])]
-        points.append(p)
+        chart_points.append(p)
 
     # live: every scored forecast this session, per model
     scored = [r for r in results if not r["gap"]]
     live_scores = {}
     for k in keys:
-        rows = pd.DataFrame([{**_qdict(r["q"][k]), "last": r["last"], "actual": r["actual"]}
+        rows = pd.DataFrame([{**_qdict(r["q"][k]), "last": r["last"], "actual": r["actual"],
+                              "points": int(points(r["q"][k][4], _width(r["q"]), r["actual"]))}
                              for r in scored if k in r["q"]])
         live_scores[k] = score(rows)
     last_result = None
     if scored:
         r = scored[-1]
-        last_result = {"target": _hhmm(r["time"]), "actual": r["actual"], "models": {
-            k: {"q10": float(r["q"][k][0]), "q90": float(r["q"][k][-1]), "inside": _inside(r["q"][k], r["actual"])}
-            for k in keys if k in r["q"]}}
-    streak = {k: [{"t": _hhmm(r["time"]), "inside": _inside(r["q"][k], r["actual"])}
-                  for r in scored[-40:] if k in r["q"]] for k in keys}
+        last_result = {"target": _hhmm(r["time"]), "last": r["last"], "actual": r["actual"], "round": len(scored),
+                       "width": _width(r["q"]),
+                       "models": {k: _game(r["q"][k], _width(r["q"]), r["actual"]) for k in keys if k in r["q"]}}
+    streak = {k: [{"t": _hhmm(r["time"]), "points": int(points(r["q"][k][4], _width(r["q"]), r["actual"]))}
+                  for r in scored[-30:] if k in r["q"]] for k in keys}
     log = [{"target": _hhmm(r["time"]), "actual": r["actual"], "gap": bool(r["gap"]),
-            "models": {k: [float(r["q"][k][0]), float(r["q"][k][-1])] for k in keys if k in r["q"]}}
+            "models": {k: _game(r["q"][k], _width(r["q"]), r["actual"]) for k in keys if k in r["q"]}}
            for r in reversed(results[-30:])]
 
     day_open = closes[closes.index.normalize() == closes.index[-1].normalize()].iloc[0]
@@ -228,10 +245,12 @@ def forecast_api(symbol: str):
         "models": [MODELS[k].info() for k in MODELS],
         "report": REPORT,
         "forecast": {"target": _hhmm(target), "last": pred["last"],
-                     "models": {k: _qdict(q) for k, q in pred["q"].items()}},
-        "points": points,
-        "replay": {k: score(replay[replay["model"] == k]) if not replay.empty else {"n": 0} for k in keys},
+                     "width": _width(pred["q"]) if pred["q"] else None,
+                     "models": {k: {**_qdict(q), **_game(q, _width(pred["q"]))} for k, q in pred["q"].items()}},
+        "points": chart_points,
+        "replay": ({k: score(rp[rp["model"] == k]) for k in keys} if not replay.empty else {k: {"n": 0} for k in keys}),
         "live": {
+            "round": len(scored) + 1,
             "made_at_local": pred["made_at"].astimezone(closes.index.tz).strftime("%H:%M:%S"),
             "made_at": pred["made_at"].isoformat(),
             "expected_in_sec": expected_in,

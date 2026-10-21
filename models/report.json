@@ -1,0 +1,153 @@
+{
+  "trained_at": "2026-10-21T07:50+00:00",
+  "tickers": 48,
+  "bars": 521844,
+  "scales": {
+    "mc": 0.95,
+    "chronos2": 0.95,
+    "timesfm": 1.3
+  },
+  "zero_shot": [
+    {
+      "model": "Monte Carlo",
+      "points": 7200,
+      "in 8-in-10 range": 0.7947222222222222,
+      "avg range width (bps)": 15.763816487902583,
+      "pinball loss (bps)": 1.9896539297321394,
+      "direction right": 0.5094599243206054
+    },
+    {
+      "model": "TimesFM 2.5",
+      "points": 7200,
+      "in 8-in-10 range": 0.8877777777777778,
+      "avg range width (bps)": 21.458644999583658,
+      "pinball loss (bps)": 2.055437819695691,
+      "direction right": 0.5068736859129872
+    },
+    {
+      "model": "Chronos-2",
+      "points": 7200,
+      "in 8-in-10 range": 0.8111111111111111,
+      "avg range width (bps)": 17.79390726174272,
+      "pinball loss (bps)": 2.0930965261421544,
+      "direction right": 0.5039599159528043
+    }
+  ],
+  "configs": {
+    "chronos2": {
+      "input_mode": "returns",
+      "context": 512
+    },
+    "timesfm": {
+      "input_mode": "returns",
+      "context": 512
+    }
+  },
+  "trained": [
+    {
+      "model": "Chronos-2",
+      "points": 7200,
+      "in 8-in-10 range": 0.7795833333333333,
+      "avg range width (bps)": 15.10749778399864,
+      "pinball loss (bps)": 1.9786482816130269,
+      "direction right": 0.5035667963683528
+    },
+    {
+      "model": "Monte Carlo",
+      "points": 7200,
+      "in 8-in-10 range": 0.7738888888888888,
+      "avg range width (bps)": 14.979690012419884,
+      "pinball loss (bps)": 1.9895351214819772,
+      "direction right": 0.5091379310344828
+    },
+    {
+      "model": "TimesFM 2.5",
+      "points": 7200,
+      "in 8-in-10 range": 0.8055555555555556,
+      "avg range width (bps)": 15.628198219670185,
+      "pinball loss (bps)": 1.997845743042852,
+      "direction right": 0.5075254895614177
+    }
+  ],
+  "device": "cuda",
+  "input_fixed": [
+    {
+      "model": "Chronos-2",
+      "points": 7200,
+      "in 8-in-10 range": 0.8025,
+      "avg range width (bps)": 15.983180950085321,
+      "pinball loss (bps)": 1.9857742907268938,
+      "direction right": 0.5004049894702738
+    },
+    {
+      "model": "Monte Carlo",
+      "points": 7200,
+      "in 8-in-10 range": 0.7944444444444444,
+      "avg range width (bps)": 15.767819702719104,
+      "pinball loss (bps)": 1.9900247823281814,
+      "direction right": 0.5113714679531358
+    },
+    {
+      "model": "TimesFM 2.5",
+      "points": 7200,
+      "in 8-in-10 range": 0.775,
+      "avg range width (bps)": 14.641114986605114,
+      "pinball loss (bps)": 2.0147566195740665,
+      "direction right": 0.4965227235969594
+    }
+  ],
+  "config_search": {
+    "chronos2": [
+      {
+        "input": "returns",
+        "context": 512,
+        "pinball (bps)": 2.1418672470101305,
+        "raw coverage 80%": 0.7864583333333334
+      },
+      {
+        "input": "returns",
+        "context": 128,
+        "pinball (bps)": 2.185184591530937,
+        "raw coverage 80%": 0.7868055555555555
+      },
+      {
+        "input": "prices",
+        "context": 512,
+        "pinball (bps)": 2.254525731957893,
+        "raw coverage 80%": 0.8236111111111111
+      },
+      {
+        "input": "prices",
+        "context": 128,
+        "pinball (bps)": 2.3380877628231933,
+        "raw coverage 80%": 0.7965277777777777
+      }
+    ],
+    "timesfm": [
+      {
+        "input": "returns",
+        "context": 512,
+        "pinball (bps)": 2.1625863504479934,
+        "raw coverage 80%": 0.778125
+      },
+      {
+        "input": "prices",
+        "context": 512,
+        "pinball (bps)": 2.183418452283355,
+        "raw coverage 80%": 0.8892361111111111
+      },
+      {
+        "input": "returns",
+        "context": 128,
+        "pinball (bps)": 2.2062582401718593,
+        "raw coverage 80%": 0.7881944444444444
+      },
+      {
+        "input": "prices",
+        "context": 128,
+        "pinball (bps)": 2.301553428621543,
+        "raw coverage 80%": 0.8784722222222222
+      }
+    ]
+  }
+}

@@ -19,21 +19,43 @@ The repo also includes a [portfolio Value-at-Risk engine](#portfolio-var-engine)
 
 ---
 
+## Results
+
+Scored on the last 2 trading sessions (7,200 forecasts across 48 tickers in 15 markets), which no model saw during training.
+Pinball (quantile) loss in basis points, lower is better:
+
+| Model | Out of the box (price input) | Return input | Fine-tuned (LoRA) |
+|---|---|---|---|
+| **Chronos-2** | 2.093 | 1.986 | **1.979** 🏆 |
+| Monte Carlo | 1.990 | 1.990 | 1.990 |
+| TimesFM 2.5 | 2.055 | 2.015 | 1.998 |
+
+- **Reading prices, both AI models lose to Monte Carlo.** They rescale each window by the price level, so the next minute's move
+  is a rounding error and they collapse to "next price ≈ last price".
+- **Switching their input to 1-minute returns fixes most of it**: Chronos-2 improves 5.1% and overtakes Monte Carlo. The
+  input and context length (returns, 512 minutes) were chosen on a held-out calibration session, never the test days.
+- **LoRA fine-tuning adds a little more** (Chronos-2 −0.4%, TimesFM −0.8%), for a total gain of 5.4% and 2.8%.
+- Margins are small because 1-minute prices are mostly noise; direction accuracy stays at a coin flip (50–51%) for every model.
+
+The trained LoRA adapters and settings are in [`models/`](models/), and the app loads them automatically.
+
 ## How a round works
 
 ```
- 1. Lock in            2. Wait                     3. Score
- ─────────────         ─────────────────────       ───────────────────────────────
- All three models  →   Next 1-minute price     →   Inside each model's range?
- save a range          arrives from Yahoo          ✓ / ✕ per model, running tally
- (10th–90th pct)       Finance                     and leaderboard update
+ 1. Aim                       2. Wait                     3. Score
+ ──────────────────────       ─────────────────────       ──────────────────────────────
+ Every player locks in its    Next 1-minute price         🎯 Bullseye (inner zone)  2 pts
+ best guess before the        arrives from Yahoo          Hit (inside the range)    1 pt
+ price exists                 Finance                     Miss                      0 pts
 ```
 
-Models are compared on the same output, the 10th–90th percentile of the next close, using:
-
-- **Pinball (quantile) loss**: the overall score. It rewards ranges that catch the price *and* stay narrow, so a model can't win by guessing wide.
-- **Coverage**: the share of prices inside the 8-in-10 range (target 80%).
-- **Direction accuracy**: up or down vs. a 50% coin flip.
+- **Same range for everyone.** Each round, all players get the same range width: the average of their own
+  10th–90th percentile ranges. Each player's range is centered on its own best guess (median), so the game only rewards aim.
+- **Bullseye zone** = the middle 20% of the range. A well-calibrated model lands about 20% bullseyes and 80% hits-or-better,
+  so roughly 1 point per round is par.
+- **Warm-up** replays the last 2 hours the moment you pick a ticker, so the scoreboard isn't empty while the live match starts.
+- **Pro stats** still judge each model's *own* range: pinball (quantile) loss, which rewards ranges that are both correct and
+  narrow, plus 80% coverage and direction accuracy.
 
 ## Quick start
 

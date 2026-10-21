@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .markets import MARKETS
-from .minute import LEVELS, MAX_GAP, QCOLS, fit_scale, pinball_bps, rescale, returns_bps, score
+from .minute import LEVELS, MAX_GAP, QCOLS, add_game_points, fit_scale, pinball_bps, rescale, returns_bps, score
 
 TRAIN_TICKERS = [s for m in MARKETS for s, _ in m["tickers"]]
 
@@ -123,13 +123,15 @@ def calibrate(models: dict, calib_rows: pd.DataFrame) -> dict[str, float]:
 
 
 def summarize(models: dict, rows: pd.DataFrame) -> pd.DataFrame:
+    rows = add_game_points(rows, ["symbol", "time"])       # same outer width for every model, per target
     out = []
     for key, m in models.items():
         r = rows[rows["model"] == key]
         if r.empty:
             continue
         s = score(r)
-        out.append({"model": m.name, "points": s["n"], "in 8-in-10 range": s["coverage80"],
+        out.append({"model": m.name, "forecasts": s["n"], "points per round": s["points_per_round"],
+                    "bullseye rate": s["bullseye"], "in 8-in-10 range": s["coverage80"],
                     "avg range width (bps)": s["width80_bps"], "pinball loss (bps)": s["pinball_bps"],
                     "direction right": s["direction_acc"]})
     return pd.DataFrame(out).set_index("model").sort_values("pinball loss (bps)")

@@ -79,3 +79,42 @@ def test_fit_scale_recovers_spread():
     actual = last + rng.normal(0, 2.0, n)
     q = last[:, None] + norm.ppf(LEVELS)[None, :] * 1.0     # forecasts half as wide as reality
     assert abs(fit_scale(q, actual, last) - 2.0) < 0.15
+
+
+def test_game_points_use_a_shared_width():
+    import pandas as pd
+    from riskmc.minute import add_game_points, points
+
+    # inner zone is 20% of the width: |off| <= 0.3 scores 2, <= 1.5 scores 1, beyond scores 0
+    assert list(points(100, 3, [100.29, 100.31, 101.5, 101.6])) == [2, 1, 1, 0]
+    rows = pd.DataFrame({"model": ["wide", "narrow"], "time": [1, 1], "q10": [96.0, 99.0], "q50": [100.0, 100.0],
+                         "q90": [104.0, 101.0], "actual": [101.0, 101.0]})
+    r = add_game_points(rows, ["time"])
+    assert list(r["game_width"]) == [5.0, 5.0]           # mean of the widths 8 and 2
+    assert list(r["points"]) == [1, 1]                   # same aim, same width -> same score
+
+
+def test_api_scores_a_live_round(monkeypatch):
+    import pandas as pd
+    import app
+    from riskmc.forecasters import MonteCarloForecaster
+
+    rng = np.random.default_rng(2)
+    now = pd.Timestamp.now(tz="UTC").floor("min")
+    idx = pd.date_range(end=now - pd.Timedelta(minutes=3), periods=900, freq="1min")
+    closes = pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 4e-4, len(idx)))), index=idx)
+    shown = {"bars": closes.iloc[:-1]}
+    monkeypatch.setattr(app, "get_bars", lambda symbol: (shown["bars"], {"currency": "USD"}))
+    app.MODELS = {"mc": MonteCarloForecaster(seed=0)}
+    app._live.clear(); app._replays.clear(); app._feed.clear()
+    client = app.app.test_client()
+
+    first = client.get("/api/forecast/TEST").get_json()           # round 1 is locked in
+    assert first["live"]["round"] == 1 and first["live"]["last_result"] is None
+    shown["bars"] = closes                                        # the next minute's price arrives
+    second = client.get("/api/forecast/TEST").get_json()
+    r = second["live"]["last_result"]
+    assert second["live"]["round"] == 2 and r["round"] == 1
+    assert r["models"]["mc"]["points"] in (0, 1, 2)
+    assert second["live"]["scores"]["mc"]["n"] == 1
+    assert len(second["points"]) == 60                            # chart data still served
