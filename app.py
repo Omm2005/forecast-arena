@@ -1,7 +1,7 @@
 """Forecast Arena: Monte Carlo vs Chronos-2 vs TimesFM, scored live on real minute prices.
 
     python app.py              # local, Monte Carlo only (AI models load if installed)
-    In Colab: see colab/Minute_Forecast_Lab.ipynb, which calls serve(models, report)
+    In Colab: see colab/Forecast_Arena.ipynb, which calls serve(models, report)
 """
 
 from __future__ import annotations

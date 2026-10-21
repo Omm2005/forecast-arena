@@ -1,4 +1,4 @@
-"""Build colab/Minute_Forecast_Lab.ipynb from the project's source files.
+"""Build colab/Forecast_Arena.ipynb from the project's source files.
 
     python colab/build_notebook.py
 """
@@ -176,6 +176,6 @@ nb = {"cells": cells, "metadata": {"accelerator": "GPU", "colab": {"provenance":
                                    "kernelspec": {"name": "python3", "display_name": "Python 3"},
                                    "language_info": {"name": "python"}},
       "nbformat": 4, "nbformat_minor": 0}
-out = ROOT / "colab" / "Minute_Forecast_Lab.ipynb"
+out = ROOT / "colab" / "Forecast_Arena.ipynb"
 out.write_text(json.dumps(nb, indent=1))
 print(f"Wrote {out} ({len(cells)} cells)")
