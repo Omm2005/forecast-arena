@@ -30,7 +30,7 @@ MARKETS = [
      "tickers": [("MC.PA", "LVMH"), ("TTE.PA", "TotalEnergies"), ("AIR.PA", "Airbus")]},
     {"id": "ch", "name": "Switzerland", "exchange": "SIX", "tz": "Europe/Zurich",
      "sessions": [("09:00", "17:30")],
-     "tickers": [("NESN.SW", "Nestlé"), ("NOVN.SW", "Novartis"), ("ROG.SW", "Roche")]},
+     "tickers": [("NESN.SW", "Nestlé"), ("NOVN.SW", "Novartis"), ("UBSG.SW", "UBS Group")]},
     {"id": "in", "name": "India", "exchange": "NSE", "tz": "Asia/Kolkata",
      "sessions": [("09:15", "15:30")],
      "tickers": [("RELIANCE.NS", "Reliance Industries"), ("TCS.NS", "Tata Consultancy"),
